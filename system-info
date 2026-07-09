@@ -1,0 +1,261 @@
+#!/bin/sh
+# Enhanced system information script - Portable across Linux distributions
+
+# Color output (optional, remove if not wanted)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m' # No Color
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
+fi
+
+print_header() {
+    echo "${BLUE}========== $1 ==========${NC}"
+}
+
+# Helper to check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Helper to read file safely
+safe_cat() {
+    if [ -f "$1" ] && [ -r "$1" ]; then
+        cat "$1" 2>/dev/null
+    fi
+}
+
+# ========== SYSTEM ==========
+print_header "SYSTEM INFORMATION"
+
+# OS Detection
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    echo "OS: ${PRETTY_NAME:-$NAME $VERSION}"
+elif [ -f /etc/lsb-release ]; then
+    . /etc/lsb-release
+    echo "OS: ${DISTRIB_DESCRIPTION}"
+else
+    echo "OS: $(uname -s) $(uname -r)"
+fi
+
+# Hardware model (works on ARM, x86, etc.)
+if [ -f /proc/device-tree/model ]; then
+    echo "Model: $(cat /proc/device-tree/model 2>/dev/null)"
+elif [ -f /sys/firmware/devicetree/base/model ]; then
+    echo "Model: $(cat /sys/firmware/devicetree/base/model 2>/dev/null)"
+elif command_exists dmidecode; then
+    echo "Model: $(dmidecode -s system-product-name 2>/dev/null || echo 'Unknown')"
+elif [ -f /sys/class/dmi/id/product_name ]; then
+    echo "Model: $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+else
+    echo "Model: Unknown (no DMI or device tree found)"
+fi
+
+echo "Hostname: $(hostname)"
+echo "Architecture: $(uname -m)"
+echo "Kernel: $(uname -r)"
+echo "Uptime: $(uptime -p 2>/dev/null || uptime | awk -F'up ' '{print $2}' | awk '{print $1,$2}')"
+
+# ========== CPU ==========
+print_header "CPU INFORMATION"
+if [ -f /proc/cpuinfo ]; then
+    # Try to get model name (works on most x86 and some ARM)
+    grep -E "model name|Processor|Hardware|Revision|CPU implementer|CPU architecture|CPU variant|CPU part" /proc/cpuinfo 2>/dev/null | head -10 | sed 's/^[ \t]*//'
+    
+    # Get CPU count
+    echo "CPU cores: $(grep -c "^processor" /proc/cpuinfo 2>/dev/null || echo "Unknown")"
+    
+    # Get CPU frequency (multiple methods)
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
+        echo "Current frequency: $(($(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null) / 1000)) MHz"
+    elif command_exists lscpu; then
+        lscpu | grep -E "MHz|GHz" | head -1
+    fi
+fi
+
+# ========== MEMORY ==========
+print_header "MEMORY INFORMATION"
+if [ -f /proc/meminfo ]; then
+    echo "Total Memory: $(grep MemTotal /proc/meminfo | awk '{printf "%.2f GB", $2/1024/1024}')"
+    echo "Free Memory: $(grep MemFree /proc/meminfo | awk '{printf "%.2f GB", $2/1024/1024}')"
+    echo "Available Memory: $(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{printf "%.2f GB", $2/1024/1024}' || echo "N/A")"
+    echo "Swap Total: $(grep SwapTotal /proc/meminfo | awk '{printf "%.2f GB", $2/1024/1024}')"
+    echo "Swap Free: $(grep SwapFree /proc/meminfo | awk '{printf "%.2f GB", $2/1024/1024}')"
+elif command_exists free; then
+    free -h
+fi
+
+# ========== STORAGE ==========
+print_header "STORAGE INFORMATION"
+if command_exists df; then
+    df -h | grep -v -E "tmpfs|udev|loop" | head -10
+fi
+
+# Detect block devices (works on most Linux)
+if command_exists lsblk; then
+    echo ""
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL 2>/dev/null | head -15
+elif command_exists fdisk; then
+    echo ""
+    fdisk -l 2>/dev/null | grep -E "Disk /dev/" | head -5
+fi
+
+# ========== NETWORK ==========
+print_header "NETWORK INTERFACES"
+if [ -d /sys/class/net ]; then
+    for iface in $(ls /sys/class/net/ 2>/dev/null); do
+        # Get MAC address
+        if [ -f "/sys/class/net/$iface/address" ]; then
+            mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
+        else
+            mac="Unknown"
+        fi
+        
+        # Check if interface is up
+        if [ -f "/sys/class/net/$iface/operstate" ]; then
+            state=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)
+        else
+            state="Unknown"
+        fi
+        
+        echo "$iface: MAC=$mac, State=$state"
+    done
+fi
+
+if command_exists ip; then
+    echo ""
+    ip -brief addr show 2>/dev/null | grep -v "^lo" || ip addr show | grep -E "^[0-9]|inet " | grep -v "inet6"
+elif command_exists ifconfig; then
+    ifconfig | grep -E "^[a-z]|inet " | grep -v "inet6"
+fi
+
+# ========== I2C ==========
+print_header "I2C ADAPTERS"
+if [ -d /sys/class/i2c-adapter ]; then
+    ls /sys/class/i2c-adapter/ 2>/dev/null || echo "No I2C adapters found"
+elif command_exists i2cdetect; then
+    i2cdetect -l 2>/dev/null | head -10
+else
+    echo "No I2C support detected"
+fi
+
+# ========== SPI ==========
+print_header "SPI MASTERS"
+if [ -d /sys/class/spi_master ]; then
+    ls /sys/class/spi_master/ 2>/dev/null || echo "No SPI masters found"
+elif [ -d /dev/spidev* ]; then
+    ls /dev/spidev* 2>/dev/null | head -10
+else
+    echo "No SPI support detected"
+fi
+
+# ========== GPIO ==========
+print_header "GPIO CHIPS"
+if [ -d /sys/class/gpio ]; then
+    ls /sys/class/gpio/ 2>/dev/null | head -10 || echo "No GPIO chips found"
+elif command_exists gpioinfo; then
+    gpioinfo 2>/dev/null | head -10
+elif command_exists lsgpio; then
+    lsgpio 2>/dev/null | head -10
+else
+    echo "No GPIO support detected"
+fi
+
+# ========== PWM ==========
+print_header "PWM CHIPS"
+if [ -d /sys/class/pwm ]; then
+    ls /sys/class/pwm/ 2>/dev/null || echo "No PWM chips found"
+else
+    echo "No PWM support detected"
+fi
+
+# ========== SERIAL PORTS ==========
+print_header "SERIAL PORTS"
+# Detect serial ports from multiple sources
+if [ -d /sys/class/tty ]; then
+    ls /sys/class/tty/ 2>/dev/null | grep -E "ttyS|ttyACM|ttyUSB|ttyO|ttyAMA|ttyHS" | head -10
+elif [ -d /dev ]; then
+    ls /dev/tty* 2>/dev/null | grep -E "ttyS|ttyACM|ttyUSB|ttyO|ttyAMA|ttyHS" | head -10
+fi
+
+# ========== THERMAL ==========
+print_header "THERMAL ZONES"
+if [ -d /sys/class/thermal ]; then
+    for zone in /sys/class/thermal/thermal_zone*; do
+        if [ -d "$zone" ]; then
+            name=$(cat "$zone/type" 2>/dev/null || echo "Unknown")
+            temp=$(cat "$zone/temp" 2>/dev/null)
+            if [ -n "$temp" ]; then
+                # Convert from millidegrees to degrees if needed
+                if [ "$temp" -gt 1000 ] 2>/dev/null; then
+                    temp="$((temp / 1000))°C"
+                else
+                    temp="${temp}°C"
+                fi
+            else
+                temp="Unknown"
+            fi
+            echo "$name: $temp"
+        fi
+    done | head -10
+else
+    echo "No thermal sensors detected"
+fi
+
+# ========== RTC ==========
+print_header="RTC DEVICES"
+if [ -d /sys/class/rtc ]; then
+    ls /sys/class/rtc/ 2>/dev/null || echo "No RTC devices found"
+    # Show current RTC time if hwclock exists
+    if command_exists hwclock; then
+        echo "RTC Time: $(hwclock -r 2>/dev/null || echo "Could not read RTC")"
+    fi
+else
+    echo "No RTC support detected"
+fi
+
+# ========== DMESG HARDWARE ==========
+print_header="DMESG HARDWARE INFO (last 20 relevant lines)"
+if command_exists dmesg; then
+    dmesg 2>/dev/null | grep -E "TI|AM65|DRA|WAGO|eth|mmc|i2c|spi|gpio|can|serial|console|CPU|usb|pci|PCI|SATA" | tail -20
+else
+    echo "dmesg not available"
+fi
+
+# ========== PCI/USB Devices (x86 common) ==========
+print_header="PCI DEVICES"
+if command_exists lspci; then
+    lspci 2>/dev/null | head -15 || echo "No PCI devices or lspci not available"
+fi
+
+print_header="USB DEVICES"
+if command_exists lsusb; then
+    lsusb 2>/dev/null | head -10 || echo "No USB devices or lsusb not available"
+fi
+
+# ========== Loaded Modules ==========
+print_header="LOADED KERNEL MODULES (first 15)"
+if command_exists lsmod; then
+    lsmod 2>/dev/null | head -16
+else
+    echo "lsmod not available"
+fi
+
+# ========== Distribution Info ==========
+print_header="PACKAGE MANAGER INFO"
+if command_exists dpkg; then
+    echo "Package count (dpkg): $(dpkg -l 2>/dev/null | grep -c '^ii') packages installed"
+elif command_exists rpm; then
+    echo "Package count (rpm): $(rpm -qa 2>/dev/null | wc -l) packages installed"
+elif [ -f /etc/alpine-release ]; then
+    echo "Package count (apk): $(apk list -I 2>/dev/null | wc -l) packages installed"
+elif command_exists pacman; then
+    echo "Package count (pacman): $(pacman -Q 2>/dev/null | wc -l) packages installed"
+fi
+
+echo ""
+echo "${GREEN}System information collection complete.${NC}"
